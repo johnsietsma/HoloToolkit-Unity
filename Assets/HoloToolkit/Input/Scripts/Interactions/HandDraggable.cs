@@ -42,17 +42,23 @@ namespace HoloToolkit.Unity.InputModule
 
         public RotationModeEnum RotationMode = RotationModeEnum.Default;
 
-        [Tooltip("Controls the speed at which the object will interpolate toward the desired position")]
-        [Range(0.01f, 1.0f)]
-        public float PositionLerpSpeed = 0.2f;
-
         [Tooltip("Controls the speed at which the object will interpolate toward the desired rotation")]
         [Range(0.01f, 1.0f)]
         public float RotationLerpSpeed = 0.2f;
 
         public bool IsDraggingEnabled = true;
 
+        [Tooltip("The amount of time to get to the drag target. A larger value will mean a smoother drag.")]
+        public float DraggingSmoothTime = 0.1f;
+
+        [Tooltip("Use the attached Rigidbody to move the GameObject")]
+        public bool UsePhysics = false;
+
+        [Tooltip("Maintain the velocity of the object after the drag ends")]
+        public bool MaintainVelocityAfterDrag = false;
+
         private Camera mainCamera;
+        private Rigidbody draggingRigidbody;
         private bool isDragging;
         private bool isGazed;
         private Vector3 objRefForward;
@@ -64,6 +70,7 @@ namespace HoloToolkit.Unity.InputModule
 
         private Vector3 draggingPosition;
         private Quaternion draggingRotation;
+        private Vector3 draggingVelocity;
 
         private IInputSource currentInputSource = null;
         private uint currentInputSourceId;
@@ -76,6 +83,22 @@ namespace HoloToolkit.Unity.InputModule
             }
 
             mainCamera = Camera.main;
+
+            if (UsePhysics)
+            {
+                draggingRigidbody = HostTransform.GetComponent<Rigidbody>();
+                if (draggingRigidbody == null)
+                {
+                    draggingRigidbody = gameObject.AddComponent<Rigidbody>();
+                    Debug.Log("UsePhysics is selected, but no RigidBody is attached to the HostTransform. Adding a RigidBody.");
+                }
+            }
+
+            if( !UsePhysics && MaintainVelocityAfterDrag )
+            {
+                MaintainVelocityAfterDrag = false;
+                Debug.LogWarning("MaintainVelocityAfterDrag is set, but UsePhysics is not set. Not maintaining velocity.");
+            }
         }
 
         private void OnDestroy()
@@ -93,9 +116,17 @@ namespace HoloToolkit.Unity.InputModule
 
         private void Update()
         {
-            if (IsDraggingEnabled && isDragging)
+            if (IsDraggingEnabled && isDragging && !UsePhysics)
             {
-                UpdateDragging();
+                UpdateDragging(Time.deltaTime);
+            }
+        }
+
+        private void FixedUpdate()
+        {
+            if (IsDraggingEnabled && isDragging && UsePhysics)
+            {
+                UpdateDragging(Time.fixedDeltaTime);
             }
         }
 
@@ -185,7 +216,7 @@ namespace HoloToolkit.Unity.InputModule
         /// <summary>
         /// Update the position of the object being dragged.
         /// </summary>
-        private void UpdateDragging()
+        private void UpdateDragging(float deltaTime)
         {
             Vector3 newHandPosition;
             currentInputSource.TryGetPosition(currentInputSourceId, out newHandPosition);
@@ -221,8 +252,23 @@ namespace HoloToolkit.Unity.InputModule
                 draggingRotation = Quaternion.LookRotation(objForward, objUp);
             }
 
+            // Calculate new position
+            Vector3 newPosition = draggingPosition + mainCamera.transform.TransformDirection(objRefGrabPoint);
+            Vector3 smoothedPosition = Vector3.SmoothDamp(HostTransform.position, newPosition, ref draggingVelocity, DraggingSmoothTime, Mathf.Infinity, deltaTime);
+
             // Apply Final Position
-            HostTransform.position = Vector3.Lerp(HostTransform.position, draggingPosition + mainCamera.transform.TransformDirection(objRefGrabPoint), PositionLerpSpeed);
+            // MovePosition with isKinematic set doesn't move the object, just set the position directly.
+            if (UsePhysics && !draggingRigidbody.isKinematic)
+            {
+                Debug.Assert(draggingRigidbody != null); // Implied by UsePhysics
+                // Move the rigidbody, uses physics interpolation.
+                draggingRigidbody.MovePosition(smoothedPosition);
+            }
+            else
+            {
+                HostTransform.position = smoothedPosition;
+            }
+
             // Apply Final Rotation
             HostTransform.rotation = Quaternion.Lerp(HostTransform.rotation, draggingRotation, RotationLerpSpeed);
 
@@ -241,6 +287,12 @@ namespace HoloToolkit.Unity.InputModule
             if (!isDragging)
             {
                 return;
+            }
+
+            if (UsePhysics && MaintainVelocityAfterDrag)
+            {
+                draggingRigidbody.velocity = draggingVelocity;
+                draggingVelocity = Vector3.zero;
             }
 
             // Remove self as a modal input handler
